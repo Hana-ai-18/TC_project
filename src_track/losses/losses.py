@@ -356,6 +356,8 @@ class SRCTrackLoss(nn.Module):
             "L_easy":     _s(L_easy),
             "L_hard":     _s(L_hard),
             "easy_frac":  easy_frac,
-            **{f"sw_{k}": v for k, v in sw_s.items()},
-            **{f"lw_{k}": v for k, v in lw_s.items()},
+            # [BUG-D FIX] stats() already has 'sw_*' and 'lw_*' prefixes
+            # f'sw_{k}' was producing 'sw_sw_72h' etc. Now using keys directly.
+            **sw_s,   # keys: sw_6h, sw_24h, sw_48h, sw_72h, sw_ratio
+            **lw_s,   # keys: lw_pos, lw_speed, lw_ep
         }

@@ -263,6 +263,11 @@ def train_epoch(model, loader, optimizer, criterion, epoch, cfg, adap=None, scal
             with torch.amp.autocast("cuda"):
                 outputs = model(batch)
                 losses  = criterion(outputs, batch, epoch)
+            # BUG-NAN FIX: check BEFORE backward — NaN loss → NaN grads corrupt weights
+            if not torch.isfinite(losses["loss"]):
+                if i < 10: print(f"  [WARN] NaN/Inf loss at batch {i}, skipping")
+                scaler.update()   # keep scaler state consistent
+                continue
             scaler.scale(losses["loss"]).backward()
             scaler.unscale_(optimizer)
             nn.utils.clip_grad_norm_(model.parameters(), cfg.train.grad_clip)
@@ -270,13 +275,13 @@ def train_epoch(model, loader, optimizer, criterion, epoch, cfg, adap=None, scal
         else:
             outputs = model(batch)
             losses  = criterion(outputs, batch, epoch)
+            # BUG-NAN FIX: check BEFORE backward — NaN loss → NaN grads corrupt weights
+            if not torch.isfinite(losses["loss"]):
+                if i < 10: print(f"  [WARN] NaN/Inf loss at batch {i}, skipping")
+                continue
             losses["loss"].backward()
             nn.utils.clip_grad_norm_(model.parameters(), cfg.train.grad_clip)
             optimizer.step()
-
-        if not torch.isfinite(losses["loss"]):
-            if i < 5: print(f"  [WARN] NaN/Inf loss at batch {i}")
-            continue
 
         total_loss += losses["loss"].item()
         for k, v in losses.items():
@@ -286,8 +291,8 @@ def train_epoch(model, loader, optimizer, criterion, epoch, cfg, adap=None, scal
 
         if i % 20 == 0:
             lr = optimizer.param_groups[0]["lr"]
-            sw_72 = losses.get("sw_sw_72h", losses.get("sw_72h", 0.))
-            sw_r  = losses.get("sw_sw_ratio", losses.get("sw_ratio", 0.))
+            sw_72 = losses.get("sw_72h", 0.)   # [BUG-D FIX] was sw_sw_72h
+            sw_r  = losses.get("sw_ratio", 0.)  # [BUG-D FIX] was sw_sw_ratio
             thr_s = f" thr={adap.get():.2f}" if adap else ""
             print(
                 f"  [{epoch:>3}][{i:>4}/{len(loader)}]"
@@ -361,7 +366,9 @@ def train(cfg: SRCTrackConfig, args=None):
         obs_len=cfg.data.obs_len, pred_len=cfg.data.pred_len, stride=cfg.data.stride,
         speed_mean=cfg.data.scs_speed_mean, speed_std=cfg.data.scs_speed_std,
         max_difficulty=diff_max,
-        use_flip_aug=True, use_noise_aug=True, use_intensity_aug=True,
+        # [BUG-A FIX] use_flip_aug removed (invalid for SCS absolute coordinates)
+        use_flip_aug=False, use_noise_aug=True, use_intensity_aug=True,
+        use_heading_jitter=True,   # [AUG-4] NEW valid augmentation
         is_val=False,  # augmentation ON for train
     )
     val_ds = SRCTrackDataset(
@@ -371,7 +378,8 @@ def train(cfg: SRCTrackConfig, args=None):
         speed_mean=cfg.data.scs_speed_mean, speed_std=cfg.data.scs_speed_std,
         max_difficulty=None,
         use_flip_aug=False, use_noise_aug=False, use_intensity_aug=False,
-        is_val=True,   # no augmentation for val
+        use_heading_jitter=False,  # no augmentation for val
+        is_val=True,
     )
     val_loader = DataLoader(val_ds, batch_size=cfg.train.batch_size,
                             shuffle=False, num_workers=cfg.train.num_workers,

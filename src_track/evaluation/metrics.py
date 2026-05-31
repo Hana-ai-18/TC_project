@@ -29,10 +29,12 @@ def compute_ate_cte(pred,gt):
     mag=torch.sqrt(gty**2+gtx**2).clamp(1e-3)
     uy=gty/mag; ux=gtx/mag
     ate=(err_lat*uy+err_lon*ux).abs().mean()
-    # CTE = cross-track = perpendicular component
-    # n_x = -u_y, n_y = u_x  →  cte = err_lat*n_x + err_lon*n_y = -err_lat*uy + err_lon*ux
-    # Note: consistent with metrics.py v7fix2 logic
-    cte=(err_lat*(-uy)+err_lon*ux).abs().mean()
+    # [BUG-C FIX] CTE = cross-track = perpendicular component = cross product magnitude
+    # Correct formula: cte = |err_lat * ux - err_lon * uy|
+    # Proof: for north track (uy=1,ux=0), east error (err_lat=0,err_lon=100):
+    #   BEFORE (wrong): (-err_lat*uy + err_lon*ux) = (0 + 0) = 0  ← incorrect
+    #   AFTER  (fixed): (err_lat*ux - err_lon*uy)  = (0 - 100) → |−100| = 100 ✓
+    cte=(err_lat*ux-err_lon*uy).abs().mean()
     return ate, cte
 
 

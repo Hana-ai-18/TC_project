@@ -50,6 +50,25 @@ ENV_TOTAL_DIMS = 84
 # SVE dims: 4+3+3+4+8+2+1+1 = 26  (W500 + T850_SST added)
 SVE_DIMS = 26
 
+# ─── Data3d channel-wise normalization (ERA5/TCND statistics) ─────────────────
+# Channels: 0:GPH200 1:GPH500 2:GPH850 3:GPH925
+#           4:U200   5:U500   6:U850   7:U925
+#           8:V200   9:V500  10:V850  11:V925  12:SST
+# Mean/std estimated from SCS TCND dataset (normalized ERA5 values)
+DATA3D_MEAN = np.array([
+    1.200, 0.580, 0.150, 0.060,   # GPH 200/500/850/925
+    0.010, 0.020, 0.005, 0.002,   # U   200/500/850/925
+    0.005, 0.010, 0.005, 0.002,   # V   200/500/850/925
+    0.800,                         # SST
+], dtype=np.float32)
+
+DATA3D_STD = np.array([
+    0.200, 0.120, 0.080, 0.060,   # GPH
+    0.150, 0.120, 0.080, 0.060,   # U
+    0.120, 0.100, 0.070, 0.050,   # V
+    0.150,                         # SST
+], dtype=np.float32)
+
 
 def env_dict_to_array(env_dict: dict) -> np.ndarray:
     parts = []
@@ -235,7 +254,10 @@ def _load_data3d_patch(fpath):
                 arr = arr[:, :81, :81]
                 if arr.shape[1]<81: arr=np.pad(arr,((0,0),(0,81-arr.shape[1]),(0,0)))
                 if arr.shape[2]<81: arr=np.pad(arr,((0,0),(0,0),(0,81-arr.shape[2])))
-            return arr[:13].astype(np.float32)
+            arr = arr[:13].astype(np.float32)
+        # BUG-NAN FIX: replace any NaN/Inf from missing data
+        arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+        return arr
     except Exception: pass
     return None
 
@@ -255,31 +277,40 @@ def _load_env_patch(fpath):
 
 # ─── Augmentation helpers ─────────────────────────────────────────────────────
 
-def _flip_obs_raw(obs_raw: np.ndarray) -> np.ndarray:
+# [BUG-A REMOVED] _flip_obs_raw, _flip_pred_raw, _flip_data3d
+# Reason: lon-mirror flip maps SCS lon_n (−18 to −9) to (9 to 18)
+#         which decodes to lon 225–260°E — physically invalid (wrong ocean).
+#         This corrupts gt_traj and all haversine loss computations.
+
+
+def _heading_jitter(obs_raw: np.ndarray, sigma_deg: float = 5.0) -> np.ndarray:
     """
-    [AUG-1] Flip lon coordinate (mirror): lon_n → -lon_n
-    Physical meaning: mirror image of TC trajectory
-    Valid because SCS dynamics are approximately symmetric about mid-lon
+    [AUG-4] NEW: Rotate last 3 obs positions by small random angle (±sigma_deg).
+    Physically valid: models uncertainty in recent track direction estimate.
+    Keeps absolute position fixed (last position unchanged) — only rotates
+    relative displacement around the last observed position.
     """
-    flipped = obs_raw.copy()
-    flipped[:, 0] = -obs_raw[:, 0]   # flip lon_n
-    return flipped
+    aug = obs_raw.copy()
+    if len(obs_raw) < 2:
+        return aug
+    # Rotate the last 3 displacements (only lon/lat) around last position
+    angle = np.random.uniform(-sigma_deg, sigma_deg) * (math.pi / 180.0)
+    cos_a, sin_a = math.cos(angle), math.sin(angle)
+    n_rotate = min(3, len(obs_raw) - 1)  # last n_rotate steps
+    last_idx = len(obs_raw) - 1
+    anchor_lon = obs_raw[last_idx, 0]
+    anchor_lat = obs_raw[last_idx, 1]
+    for i in range(last_idx - n_rotate, last_idx):
+        dlon = obs_raw[i, 0] - anchor_lon
+        dlat = obs_raw[i, 1] - anchor_lat
+        aug[i, 0] = anchor_lon + cos_a * dlon - sin_a * dlat
+        aug[i, 1] = anchor_lat + sin_a * dlon + cos_a * dlat
+    return aug
 
 
-def _flip_pred_raw(pred_raw: np.ndarray) -> np.ndarray:
-    flipped = pred_raw.copy()
-    flipped[:, 0] = -pred_raw[:, 0]
-    return flipped
-
-
-def _flip_data3d(data3d: np.ndarray) -> np.ndarray:
-    """Flip ERA5 patch horizontally [T,C,H,W] → flip W axis"""
-    return np.flip(data3d, axis=3).copy()
-
-
-def _add_obs_noise(obs_raw: np.ndarray, sigma: float = 0.005) -> np.ndarray:
+def _add_obs_noise(obs_raw: np.ndarray, sigma: float = 0.008) -> np.ndarray:
     """
-    [AUG-2] Add Gaussian noise to lon/lat (σ≈0.5km).
+    [AUG-2] Add Gaussian noise to lon/lat (σ≈0.8km, increased from 0.005).
     pres/wnd not noised (less important for track).
     """
     noised = obs_raw.copy()
@@ -316,11 +347,12 @@ class SRCTrackDataset(Dataset):
                  max_difficulty: Optional[float] = None,
                  use_sve_cache: bool = True, sve_cache_dir: Optional[str] = None,
                  use_stride_aug: bool = True, aug_strides: List[int] = None,
-                 # Augmentation flags
-                 use_flip_aug: bool = True,      # [AUG-1]
-                 use_noise_aug: bool = True,     # [AUG-2]
-                 use_intensity_aug: bool = True, # [AUG-3]
-                 is_val: bool = False):           # val: no augmentation
+                 # Augmentation flags  (use_flip_aug removed — BUG-A)
+                 use_flip_aug: bool = False,      # [BUG-A] DISABLED — invalid lon mirror
+                 use_noise_aug: bool = True,      # [AUG-2]
+                 use_intensity_aug: bool = True,  # [AUG-3]
+                 use_heading_jitter: bool = True, # [AUG-4] NEW: heading rotation ±5°
+                 is_val: bool = False):            # val: no augmentation
         super().__init__()
         self.obs_len  = obs_len; self.pred_len = pred_len; self.stride = stride
         self.speed_mean = speed_mean; self.speed_std = speed_std
@@ -330,9 +362,11 @@ class SRCTrackDataset(Dataset):
         self.use_stride_aug = use_stride_aug
         self.aug_strides = aug_strides or [2, 3]
         # Augmentation — disabled for val
-        self.use_flip_aug      = use_flip_aug      and not is_val
-        self.use_noise_aug     = use_noise_aug     and not is_val
-        self.use_intensity_aug = use_intensity_aug and not is_val
+        # [BUG-A] use_flip_aug always False (invalid for SCS absolute coordinates)
+        self.use_flip_aug      = False  # permanently disabled
+        self.use_noise_aug     = use_noise_aug      and not is_val
+        self.use_intensity_aug = use_intensity_aug  and not is_val
+        self.use_heading_jitter= use_heading_jitter and not is_val  # [AUG-4]
 
         self.storm_data = self._load_data1d(data1d_path)
 
@@ -352,7 +386,7 @@ class SRCTrackDataset(Dataset):
                           if max_difficulty is not None else list(all_seqs))
 
         n_storms = len(self.storm_data)
-        aug_info = "" if is_val else f" flip={use_flip_aug} noise={use_noise_aug}"
+        aug_info = "" if is_val else f" noise={use_noise_aug} heading_jitter={use_heading_jitter}"
         print(f"  [Dataset] {os.path.basename(data1d_path)}: {n_storms} storms, "
               f"{len(self.sequences)} seqs (total={len(all_seqs)}){aug_info}")
 
@@ -415,7 +449,14 @@ class SRCTrackDataset(Dataset):
             fp = _find_npy_file(self.data3d_dir, year, name, ts)
             p  = _load_data3d_patch(fp) if fp else None
             patches.append(p if p is not None else np.zeros((13,81,81), dtype=np.float32))
-        return np.stack(patches, axis=0)  # [T,13,81,81]
+        data3d = np.stack(patches, axis=0)  # [T,13,81,81]
+        # BUG-NAN FIX: normalize per-channel to ~N(0,1) so SCE attention doesn't overflow
+        # DATA3D_MEAN/STD are [13] — broadcast over [T,13,H,W]
+        mean = DATA3D_MEAN[np.newaxis, :, np.newaxis, np.newaxis]  # [1,13,1,1]
+        std  = DATA3D_STD[ np.newaxis, :, np.newaxis, np.newaxis]  # [1,13,1,1]
+        data3d = (data3d - mean) / (std + 1e-6)
+        data3d = np.clip(data3d, -10., 10.)   # hard clip for any extreme outliers
+        return data3d
 
     def _load_env_data(self, year, name, timestamps):
         rows = []
@@ -449,42 +490,37 @@ class SRCTrackDataset(Dataset):
 
         # ── [AUG-2] Noise on lon/lat ──────────────────────────
         if self.use_noise_aug and random.random() < 0.5:
-            obs_raw = _add_obs_noise(obs_raw, sigma=0.005)
+            obs_raw = _add_obs_noise(obs_raw, sigma=0.008)  # increased from 0.005
 
         # ── [AUG-3] Intensity jitter ──────────────────────────
         if self.use_intensity_aug and random.random() < 0.3:
             obs_raw = _add_intensity_jitter(obs_raw, sigma=0.02)
 
-        # ── [AUG-1] Flip lon-mirror ───────────────────────────
-        do_flip = self.use_flip_aug and random.random() < 0.5
-        if do_flip:
-            obs_raw  = _flip_obs_raw(obs_raw)
-            pred_raw = _flip_pred_raw(pred_raw)
+        # ── [AUG-4] Heading jitter ────────────────────────────
+        # [BUG-A] Flip augmentation REMOVED — was mapping SCS coords to wrong ocean
+        # Replacement: heading jitter (physically valid rotation ±5° on recent obs)
+        if self.use_heading_jitter and random.random() < 0.5:
+            obs_raw = _heading_jitter(obs_raw, sigma_deg=5.0)
 
         # ── PhysNorm ──────────────────────────────────────────
         physnorm = physnorm_transform(obs_raw, self.speed_mean, self.speed_std)
+        # BUG-NAN FIX: speed_std=0 edge case (e.g. storm at rest all 8 steps)
+        physnorm = np.nan_to_num(physnorm, nan=0.0, posinf=0.0, neginf=0.0)
 
         # ── GT trajectory ─────────────────────────────────────
+        # NOTE: pred_raw is NOT augmented (only obs_raw gets noise/jitter)
+        # gt_traj always uses original pred_raw → correct absolute positions
         pred_phys = decode_data1d(pred_raw)
-        gt_traj   = pred_phys[:, [1,0]].astype(np.float32)  # lat, lon
+        gt_traj   = pred_phys[:, [1, 0]].astype(np.float32)  # [T, 2] = (lat°, lon°)
         obs_phys  = decode_data1d(obs_raw)
-        last_pos  = obs_phys[-1, [1,0]].astype(np.float32)
+        last_pos  = obs_phys[-1, [1, 0]].astype(np.float32)  # [2] = (lat°, lon°)
 
         # ── Data3d + Env ──────────────────────────────────────
         data3d   = self._load_data3d(year, name, obs_ts)
         env_data = self._load_env_data(year, name, obs_ts)
 
-        if do_flip:
-            data3d = _flip_data3d(data3d)
-            # Flip u-wind channels (4,5,6,7 = U200,U500,U850,U925): sign flip
-            data3d[:, [4,5,6,7], :, :] *= -1.
-            # last_pos lon also flipped
-            phys_flipped = decode_data1d(obs_raw)
-            last_pos = phys_flipped[-1, [1,0]].astype(np.float32)
-
         # ── SVE ───────────────────────────────────────────────
-        flip_suffix = "_flip" if do_flip else ""
-        cache_key   = f"{sid}_{seq['start_idx']}{flip_suffix}"
+        cache_key = f"{sid}_{seq['start_idx']}"
         sve = self._get_sve(cache_key, data3d)
 
         return {

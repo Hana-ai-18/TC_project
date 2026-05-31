@@ -176,6 +176,8 @@ class SpatialContextEncoder(nn.Module):
         """
         # Cast to float32: SCE attention overflows with float16 (AMP)
         data3d_t = data3d_t.float()
+        # BUG-NAN FIX: guard against any NaN/Inf that slipped through data pipeline
+        data3d_t = torch.nan_to_num(data3d_t, nan=0.0, posinf=10.0, neginf=-10.0)
         B = data3d_t.shape[0]
 
         # ── Steering branch ───────────────────────────────────
@@ -352,9 +354,9 @@ class SpeedHead(nn.Module):
             nn.Linear(64, pred_len),
         )
         # Init output bias → SCS mean speed ~18 km/6h at epoch 0
-        # softplus(b)*5 + speed_min = 18  →  softplus(b) = 3  →  b ≈ 2.95
+        # softplus(b)*5 + speed_min = 18  →  softplus(b) = 3.0  →  b ≈ 2.95
         with torch.no_grad():
-            self.net[-1].bias.fill_(18.0)  # FIX v3b: was 9→48km/6h, now 18→93km/6h (SCS actual mean=113)
+            self.net[-1].bias.fill_(2.95)   # BUG-NAN FIX: was 18.0 → gave ~93 km/6h initial speed
 
     def forward(self, context: torch.Tensor) -> torch.Tensor:
         raw = self.net(context)   # [B, T_pred]
@@ -515,10 +517,17 @@ class RegimeConditionedDecoder(nn.Module):
             spd = pred_speed[:, t]   # [B]  km/6h, already clamped
 
             # Displacement in degrees
+            # [BUG-B FIX] Heading convention: heading = atan2(dx_EW, dy_NS) = bearing
+            #   persist_dir = [sin(heading), cos(heading)]
+            #   sin(heading) = EW component  → maps to LON displacement
+            #   cos(heading) = NS component  → maps to LAT displacement
+            # BEFORE (wrong): delta_lat = spd * dir_blend[:,0]  (was using sin=EW for lat)
+            # AFTER  (fixed): delta_lat = spd * dir_blend[:,1]  (cos=NS for lat ✓)
             lat_rad = torch.deg2rad(pos[:, 0])
-            # dir_blend: [lat_component, lon_component]
-            delta_lat = spd * dir_blend[:, 0] / 111.0
-            delta_lon = spd * dir_blend[:, 1] / (111.0 * torch.cos(lat_rad).clamp(min=1e-3))
+            # dir_blend[:,1] = cos component = NS direction → lat
+            # dir_blend[:,0] = sin component = EW direction → lon
+            delta_lat = spd * dir_blend[:, 1] / 111.0
+            delta_lon = spd * dir_blend[:, 0] / (111.0 * torch.cos(lat_rad).clamp(min=1e-3))
 
             delta = torch.stack([delta_lat, delta_lon], dim=-1)
             # Clamp delta per step: max 100km/6h = ~0.9° — prevents runaway
@@ -530,8 +539,11 @@ class RegimeConditionedDecoder(nn.Module):
                 pos[:, 1].clamp(60.0, 200.0),    # lon (SCS region)
             ], dim=-1)
 
-            # Update heading for next step
-            heading  = torch.atan2(dir_blend[:, 1], dir_blend[:, 0])
+            # [BUG-B FIX] Update heading: atan2(sin_component, cos_component)
+            # = atan2(EW, NS) = bearing convention consistent with physnorm_transform
+            # BEFORE (wrong): atan2(dir_blend[:,1], dir_blend[:,0]) = atan2(cos,sin) ← inverted
+            # AFTER  (fixed): atan2(dir_blend[:,0], dir_blend[:,1]) = atan2(sin,cos) ✓
+            heading  = torch.atan2(dir_blend[:, 0], dir_blend[:, 1])
             speed_p  = spd
 
             trajectory.append(pos.clone())
@@ -770,7 +782,10 @@ def build_model(cfg=None) -> SRCTrack:
         sce_d_model=m.sce_d_model,   sce_n_heads=m.sce_n_heads,
         sce_n_layers=m.sce_n_layers, sce_patch_size=m.sce_patch_size,
         sce_thermo_dim=m.sce_thermo_dim,
-        tke_input_dim=m.tke_input_dim,  # 119 = 9+26+84 tke_d_model=m.tke_d_model,
+        # [BUG-E FIX] tke_d_model was accidentally commented out
+        # old: tke_input_dim=m.tke_input_dim,  # 119 = 9+26+84 tke_d_model=m.tke_d_model,
+        tke_input_dim=m.tke_input_dim,   # 119 = 9(physnorm)+26(SVE)+84(env)
+        tke_d_model=m.tke_d_model,       # FIX: was missing — model used default 64
         tke_n_heads=m.tke_n_heads,   tke_n_layers=m.tke_n_layers,
         obs_len=cfg.data.obs_len,
         rc_dropout=0.3,
