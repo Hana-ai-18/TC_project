@@ -102,7 +102,7 @@ class ModelConfig:
 @dataclass
 class LossConfig:
     # L_total = L_pos + w_speed*L_speed + w_regime*L_regime + w_div*L_diversity
-    w_speed:  float = 5.0    # FIX: was 0.5, needs 10x to compete with L_pos~500
+    w_speed:  float = 10.0   # FIX v3b: was 5.0, gt_speed=113 needs stronger signal
     w_regime: float = 0.5    # FIX: was 0.1, RC not learning due to tiny gradient
     w_div:    float = 0.05
 

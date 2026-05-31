@@ -354,7 +354,7 @@ class SpeedHead(nn.Module):
         # Init output bias → SCS mean speed ~18 km/6h at epoch 0
         # softplus(b)*5 + speed_min = 18  →  softplus(b) = 3  →  b ≈ 2.95
         with torch.no_grad():
-            self.net[-1].bias.fill_(9.0)   # FIX: was 2.95→18km/6h, now 9→48km/6h (SCS true mean)
+            self.net[-1].bias.fill_(18.0)  # FIX v3b: was 9→48km/6h, now 18→93km/6h (SCS actual mean=113)
 
     def forward(self, context: torch.Tensor) -> torch.Tensor:
         raw = self.net(context)   # [B, T_pred]
