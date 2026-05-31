@@ -107,17 +107,21 @@ class AdaptiveThreshold:
 
 def get_difficulty_max(epoch: int, cfg: SRCTrackConfig) -> Optional[float]:
     t = cfg.train
-    if epoch <= t.phase1_end:   return t.phase1_diff_max
-    elif epoch <= t.phase2_end: return t.phase2_diff_max
-    else:                       return None
+    if epoch <= t.phase1_end:   return t.phase1_diff_max  # 0.7 (was 0.4)
+    elif epoch <= t.phase2_end: return t.phase2_diff_max  # 1.0 = all seqs (was 0.7)
+    else:                       return None               # all seqs
 
 
 def make_sampler(dataset, epoch: int,
                  cfg: SRCTrackConfig) -> Optional[WeightedRandomSampler]:
-    """Phase 3+: oversample Regime B 1.5×. Works with SRCTrackDataset or Subset."""
-    if epoch <= cfg.train.phase2_end:
-        return None
-    # BUG-8 FIX: get sequences from underlying dataset if Subset
+    """
+    Regime-stratified sampling from ep1 to prevent RC regime collapse.
+    FIX: was only active for phase3+. Now active from ep1 with increasing weight.
+      Phase 1 (ep 1-5):  Regime B 2.0×, Regime C 1.5× (build diverse RC from scratch)
+      Phase 2 (ep 6-20): Regime B 1.8×, Regime C 1.3×
+      Phase 3+ (ep21+):  Regime B 1.5×, Regime C 1.1×
+    Works with SRCTrackDataset or Subset. (BUG-8 FIX)
+    """
     from torch.utils.data import Subset
     if isinstance(dataset, Subset):
         base    = dataset.dataset
@@ -125,12 +129,28 @@ def make_sampler(dataset, epoch: int,
         seqs    = [base.sequences[i] for i in indices]
     else:
         seqs = dataset.sequences
-    weights = [1.5 if s['regime'] == 1 else 1.0 for s in seqs]
+
+    t = cfg.train
+    if epoch <= t.phase1_end:
+        # Strongest upsampling — RC must see all regimes early
+        wb, wc = 2.0, 1.5
+    elif epoch <= t.phase2_end:
+        wb, wc = 1.8, 1.3
+    else:
+        wb, wc = 1.5, 1.1
+
+    weights = []
+    for s in seqs:
+        r = s['regime']
+        if r == 1:   weights.append(wb)
+        elif r == 2: weights.append(wc)
+        else:        weights.append(1.0)
     return WeightedRandomSampler(weights, num_samples=len(weights), replacement=True)
 
 
 def make_dataloader(dataset, epoch: int,
                     cfg: SRCTrackConfig, shuffle: bool = True) -> DataLoader:
+    # FIX: regime sampler now always active during training (from ep1)
     sampler = make_sampler(dataset, epoch, cfg) if shuffle else None
     return DataLoader(
         dataset,
@@ -392,17 +412,16 @@ def train(cfg: SRCTrackConfig, args=None):
 
     # BUG-1 FIX: criterion defined BEFORE optimizer
     criterion = SRCTrackLoss(
-        w_regime=cfg.loss.w_regime,
+        w_speed=cfg.loss.w_speed,            # 5.0 (was 10.0)
+        w_regime=cfg.loss.w_regime,          # 2.0 (was 1.0) — RC needs strong signal
         w_div=cfg.loss.w_div,
-        regime_start_epoch=cfg.loss.regime_start_epoch,
-        div_start_epoch=cfg.loss.div_start_epoch,
+        regime_start_epoch=cfg.loss.regime_start_epoch,  # 1 (was 16)
+        div_start_epoch=cfg.loss.div_start_epoch,        # 21 (was 31)
         huber_delta=cfg.loss.huber_delta,
         rii_threshold=cfg.loss.rii_threshold,
         rii_weight_scale=cfg.loss.rii_weight_scale,
         regime_b_extra=cfg.loss.regime_b_extra,
         easy_thresh=cfg.train.easy_thresh_init,
-        # v3 explicit speed weight
-        w_speed=cfg.loss.w_speed,
     ).to(device)
 
     # FIX: Bỏ warmup, dùng lr constant + CosineAnnealing (đã chứng minh ổn định)

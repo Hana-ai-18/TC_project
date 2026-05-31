@@ -214,13 +214,13 @@ class SRCTrackLoss(nn.Module):
     """
 
     def __init__(self,
-                 # Speed weight — critical for ATE fix
-                 w_speed:  float = 5.0,    # was 0.5 → 10x amplify
-                 # Auxiliary (fixed)
-                 w_regime: float = 0.5,    # was 0.1 → RC needs more signal
+                 # Speed weight
+                 w_speed:  float = 5.0,    # FIX: was 10.0 — dominant speed prevents direction learning
+                 # Auxiliary
+                 w_regime: float = 2.0,    # FIX: was 0.5 → RC needs strong signal from ep1
                  w_div:    float = 0.05,
-                 regime_start_epoch: int = 16,
-                 div_start_epoch:    int = 31,
+                 regime_start_epoch: int = 1,    # FIX: was 16 — RC needs signal from day 1
+                 div_start_epoch:    int = 21,   # FIX: was 31
                  # L_pos params
                  huber_delta:      float = 300.0,   # FIX: was 100
                  rii_threshold:    float = 0.5,
@@ -320,9 +320,14 @@ class SRCTrackLoss(nn.Module):
         L_main = 0.5 * L_easy + 0.5 * L_hard
 
         # Auxiliary losses (curriculum)
+        # FIX: regime loss active from ep1 with linear ramp to avoid early collapse
+        # w_regime_eff: 0.1 at ep1, full w_regime by ep5
         if current_epoch >= self.regime_start:
             l_regime = regime_loss(regime_logits, regime_labels,
                                    self.label_smoothing)
+            # Linear ramp: ep1→0.1×, ep5→1.0×, ep5+→1.0×
+            ramp = min(1.0, 0.1 + 0.9 * (current_epoch - self.regime_start) / 4.0)
+            l_regime = l_regime * ramp
         else:
             l_regime = pred_traj.new_zeros(())
 

@@ -89,7 +89,7 @@ class ModelConfig:
     # Speed Head
     speed_hidden: int   = 128
     speed_min:    float = 3.0
-    speed_max:    float = 100.0
+    speed_max:    float = 150.0   # FIX: was 100. gt_speed=113 → capped → bias can never close
 
     # MoE Decoder
     expert_d_model:  int = 64
@@ -102,13 +102,13 @@ class ModelConfig:
 @dataclass
 class LossConfig:
     # L_total = L_pos + w_speed*L_speed + w_regime*L_regime + w_div*L_diversity
-    w_speed:  float = 10.0   # FIX v3b: was 5.0, gt_speed=113 needs stronger signal
-    w_regime: float = 1.0  # FIX: was 0.5    # FIX: was 0.1, RC not learning due to tiny gradient
+    w_speed:  float = 5.0    # FIX: was 10.0 — was too dominant, prevents direction learning
+    w_regime: float = 2.0    # FIX: was 1.0 — RC needs stronger signal from ep1
     w_div:    float = 0.05
 
-    # Curriculum activation epochs
-    regime_start_epoch: int = 16
-    div_start_epoch:    int = 31
+    # Curriculum activation epochs — FIXED: regime loss from ep1 prevents RC collapse
+    regime_start_epoch: int = 1    # FIX: was 16. RC needs signal from day 1
+    div_start_epoch:    int = 21   # FIX: was 31. Align with new phase3_end
 
     # L_pos
     huber_delta:    float = 300.0   # must match ADE scale ~300km
@@ -128,14 +128,14 @@ class LossConfig:
 
 @dataclass
 class TrainConfig:
-    # Curriculum phases
-    phase1_end: int = 15   # Easy only: difficulty < 0.4
-    phase2_end: int = 30   # Easy+Medium: + L_regime
-    phase3_end: int = 50   # All: + L_diversity
+    # Curriculum phases — FIXED: shorter phase1 to avoid RC regime collapse
+    phase1_end: int = 5    # FIX: was 15. 15 epochs of RC-blind mode caused regime_acc=36%
+    phase2_end: int = 20   # FIX: was 30. L_regime starts ep6 (was ep16)
+    phase3_end: int = 45   # All: + L_diversity
     phase4_end: int = 70   # Fine-tune
 
-    phase1_diff_max: float = 0.4
-    phase2_diff_max: float = 0.7
+    phase1_diff_max: float = 0.7    # FIX: was 0.4 — kept too many Regime-A-only seqs
+    phase2_diff_max: float = 1.0    # FIX: was 0.7 — use all seqs from phase2 onward
 
     # Easy/Hard adaptive threshold (thầy's suggestion)
     # Keeps ~50% easy, ~50% hard regardless of dataset distribution

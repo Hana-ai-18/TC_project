@@ -338,7 +338,7 @@ class SpeedHead(nn.Module):
         d_context: int = 256,
         pred_len:  int = 12,
         speed_min: float = 3.0,
-        speed_max: float = 100.0,
+        speed_max: float = 150.0,  # FIX: was 100 → gt_speed=113 was unreachable
         hidden:    int = 128,
     ):
         super().__init__()
@@ -353,10 +353,10 @@ class SpeedHead(nn.Module):
             nn.GELU(),
             nn.Linear(64, pred_len),
         )
-        # Init output bias → SCS mean speed ~18 km/6h at epoch 0
-        # softplus(b)*5 + speed_min = 18  →  softplus(b) = 3.0  →  b ≈ 2.95
+        # Init output bias → target ~50 km/6h at epoch 0 (between obs_mean=18 and gt=113)
+        # softplus(b)*5 + speed_min = 50  →  softplus(b) = 9.4  →  b ≈ 9.4
         with torch.no_grad():
-            self.net[-1].bias.fill_(2.95)   # BUG-NAN FIX: was 18.0 → gave ~93 km/6h initial speed
+            self.net[-1].bias.fill_(9.4)   # FIX: was 2.95 → gave ~18 km/6h (too slow init)
 
     def forward(self, context: torch.Tensor) -> torch.Tensor:
         raw = self.net(context)   # [B, T_pred]
