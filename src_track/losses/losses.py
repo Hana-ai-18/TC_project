@@ -34,7 +34,10 @@ class ConstrainedStepWeights(nn.Module):
         self.pred_len  = pred_len
         self.ratio_min = ratio_min
         # Init: linear ramp from 0.5 to 2.0
-        self.raw = nn.Parameter(torch.ones(pred_len) * 0.3)
+        # Init: nearly uniform weights (ratio≈1.0)
+        # Model learns 72h emphasis naturally from data
+        # ratio_min=3.0 penalty will push ratio up gradually
+        self.raw = nn.Parameter(torch.ones(pred_len) * 0.02)
 
     def forward(self) -> torch.Tensor:
         # cumsum(softplus) → strictly increasing
@@ -43,8 +46,10 @@ class ConstrainedStepWeights(nn.Module):
         w = w * self.pred_len / (w.sum() + 1e-8)
         return w  # [12]
 
-    def penalty(self) -> torch.Tensor:
-        """Soft penalty if ratio < ratio_min."""
+    def penalty(self, epoch: int = 100) -> torch.Tensor:
+        """Soft penalty if ratio < ratio_min. Disabled for first 15 epochs."""
+        if epoch < 15:
+            return torch.zeros(1, device=self.raw.device).squeeze()
         w = self.forward()
         ratio = w[-1] / (w[0].clamp(min=1e-6))
         return 0.1 * F.relu(self.ratio_min - ratio) ** 2
@@ -138,7 +143,7 @@ def compute_gt_speed(gt_traj: torch.Tensor) -> torch.Tensor:
 
 def _position_loss_per_sample(pred_traj, gt_traj, step_weights,
                                regime_labels, rii_values,
-                               huber_delta=300.0,
+                               huber_delta=100.0,
                                rii_threshold=0.5, rii_weight_scale=1.5,
                                regime_b_extra=0.5) -> torch.Tensor:
     """Per-sample L_pos → [B]"""
@@ -217,7 +222,7 @@ class SRCTrackLoss(nn.Module):
                  regime_start_epoch: int = 16,
                  div_start_epoch:    int = 31,
                  # L_pos params
-                 huber_delta:      float = 300.0,   # FIX: was 50
+                 huber_delta:      float = 100.0,
                  rii_threshold:    float = 0.5,
                  rii_weight_scale: float = 1.5,
                  regime_b_extra:   float = 0.5,
@@ -327,7 +332,7 @@ class SRCTrackLoss(nn.Module):
             l_div = pred_traj.new_zeros(())
 
         # Regularization on learned weights
-        l_reg = self.step_weights.penalty() + self.loss_weights.penalty()
+        l_reg = self.step_weights.penalty(current_epoch) + self.loss_weights.penalty()
 
         total = (L_main
                  + self.w_regime * l_regime

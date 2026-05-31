@@ -393,6 +393,9 @@ class TrajectoryExpert(nn.Module):
         )
         self.decoder    = nn.TransformerDecoder(dec_layer, num_layers=n_layers)
         self.output_proj = nn.Linear(d_model, 2)
+        # Init to near-zero → rotation ≈ identity → persistence at start
+        nn.init.normal_(self.output_proj.weight, std=0.01)
+        nn.init.zeros_(self.output_proj.bias)
 
     def forward(self, state: torch.Tensor, context: torch.Tensor) -> torch.Tensor:
         q   = self.state_proj(state).unsqueeze(1)     # [B, 1, D]
@@ -453,19 +456,23 @@ class RegimeConditionedDecoder(nn.Module):
 
     def forward(
         self,
-        context:       torch.Tensor,   # [B, 256]
-        regime_probs:  torch.Tensor,   # [B, 3]   P(A), P(B), P(C)
-        pred_speed:    torch.Tensor,   # [B, T_pred]  km/6h
-        last_pos:      torch.Tensor,   # [B, 2]  physical (lat°, lon°)
+        context:       torch.Tensor,                  # [B, 256]
+        regime_probs:  torch.Tensor,                  # [B, 3]
+        pred_speed:    torch.Tensor,                  # [B, T_pred]  km/6h
+        last_pos:      torch.Tensor,                  # [B, 2]  lat°, lon°
+        init_heading:  Optional[torch.Tensor] = None, # [B] radians, from last obs
+        init_speed:    Optional[torch.Tensor] = None, # [B] km/6h, from last obs
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
 
         B = context.shape[0]
         device = context.device
 
-        pos      = last_pos.clone()                        # [B, 2]
-        origin   = last_pos.clone()                        # reference for relative pos
-        heading  = torch.zeros(B, device=device)           # initial heading = 0
-        speed_p  = torch.full((B,), 18.0, device=device)  # initial prev speed
+        pos     = last_pos.clone()
+        origin  = last_pos.clone()
+        # Persistence init: use last observed heading and speed
+        # This dramatically improves epoch-1 performance
+        heading = init_heading if init_heading is not None else torch.zeros(B, device=device)
+        speed_p = init_speed   if init_speed   is not None else torch.full((B,), 18.0, device=device)
 
         trajectory = []
         dirs_A, dirs_B, dirs_C = [], [], []
@@ -481,12 +488,28 @@ class RegimeConditionedDecoder(nn.Module):
             dirs_B.append(dB)
             dirs_C.append(dC)
 
-            # Soft blend
+            # Soft blend of expert directions
             pA = regime_probs[:, 0:1]   # [B, 1]
             pB = regime_probs[:, 1:2]
             pC = regime_probs[:, 2:3]
             dir_blend = pA * dA + pB * dB + pC * dC     # [B, 2]
-            dir_blend = F.normalize(dir_blend, dim=-1)   # re-normalise
+
+            # Residual rotation: blend experts' direction AS a rotation applied
+            # to the current heading (persistence direction)
+            # This ensures model starts with correct heading direction
+            # persist_dir = [sin(heading), cos(heading)] in lat/lon space
+            persist_dir = torch.stack([torch.sin(heading), torch.cos(heading)], dim=-1)  # [B, 2]
+
+            # Blend of learned directions interpreted as rotation matrix components
+            # dir_blend = [sin(dθ+eps), cos(dθ+eps)] ≈ [eps, 1] at init
+            # Apply rotation: rotate persist_dir by this
+            s_d = dir_blend[:, 0]; c_d = dir_blend[:, 1]
+            s_p = persist_dir[:, 0]; c_p = persist_dir[:, 1]
+            # Rotation: new_sin = c_d*s_p + s_d*c_p, new_cos = c_d*c_p - s_d*s_p
+            new_sin = c_d * s_p + s_d * c_p   # [B]
+            new_cos = c_d * c_p - s_d * s_p   # [B]
+            dir_blend = torch.stack([new_sin, new_cos], dim=-1)
+            dir_blend = F.normalize(dir_blend, dim=-1)   # [B, 2]
 
             # Speed at step t
             spd = pred_speed[:, t]   # [B]  km/6h, already clamped
@@ -636,8 +659,17 @@ class SRCTrack(nn.Module):
         pred_speed                  = self.speed_head(context)   # [B, T_pred]
 
         # ── Decode ────────────────────────────────────────────
+        # Extract last obs heading and speed for persistence initialization
+        # physnorm: [B, T_obs, 9] where dim 4=speed_n, 5=heading_sin, 6=heading_cos
+        last_speed_n  = physnorm[:, -1, 4]          # [B]
+        last_speed_km = last_speed_n * 8.0 + 18.0   # decode SCS-normalized
+        last_h_sin    = physnorm[:, -1, 5]           # [B]
+        last_h_cos    = physnorm[:, -1, 6]           # [B]
+        last_heading  = torch.atan2(last_h_sin, last_h_cos)  # [B] radians
+
         pred_traj, expert_dirs = self.decoder(
-            context, regime_probs, pred_speed, last_pos
+            context, regime_probs, pred_speed, last_pos,
+            init_heading=last_heading, init_speed=last_speed_km.clamp(3., 100.)
         )   # [B, T_pred, 2], dict
 
         # Cast all outputs to float32 (safe with AMP float16 forward pass)
