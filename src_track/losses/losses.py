@@ -34,10 +34,7 @@ class ConstrainedStepWeights(nn.Module):
         self.pred_len  = pred_len
         self.ratio_min = ratio_min
         # Init: linear ramp from 0.5 to 2.0
-        # Init: nearly uniform weights (ratio≈1.0)
-        # Model learns 72h emphasis naturally from data
-        # ratio_min=3.0 penalty will push ratio up gradually
-        self.raw = nn.Parameter(torch.ones(pred_len) * 0.02)
+        self.raw = nn.Parameter(torch.ones(pred_len) * 0.3)
 
     def forward(self) -> torch.Tensor:
         # cumsum(softplus) → strictly increasing
@@ -46,10 +43,8 @@ class ConstrainedStepWeights(nn.Module):
         w = w * self.pred_len / (w.sum() + 1e-8)
         return w  # [12]
 
-    def penalty(self, epoch: int = 100) -> torch.Tensor:
-        """Soft penalty if ratio < ratio_min. Disabled for first 15 epochs."""
-        if epoch < 15:
-            return torch.zeros(1, device=self.raw.device).squeeze()
+    def penalty(self) -> torch.Tensor:
+        """Soft penalty if ratio < ratio_min."""
         w = self.forward()
         ratio = w[-1] / (w[0].clamp(min=1e-6))
         return 0.1 * F.relu(self.ratio_min - ratio) ** 2
@@ -82,7 +77,7 @@ class ConstrainedLossWeights(nn.Module):
         if y > 20.: return y
         return math.log(math.expm1(max(y, 1e-6)))
 
-    def __init__(self, init_pos=1.0, init_speed=0.5, init_ep=0.5, anchor_w=0.02):
+    def __init__(self, init_pos=1.0, init_speed=10.0, init_ep=0.5, anchor_w=0.001):
         super().__init__()
         self.anchor_w = anchor_w
         raw = torch.tensor([
@@ -96,7 +91,7 @@ class ConstrainedLossWeights(nn.Module):
     def w_pos(self)   -> torch.Tensor:
         return F.softplus(self.log_w[0]).clamp(0.5, 3.0)
     def w_speed(self) -> torch.Tensor:
-        return F.softplus(self.log_w[1]).clamp(0.1, 5.0)  # FIX: was 2.0
+        return F.softplus(self.log_w[1]).clamp(0.1, 50.0)  # wider: model learns needed scale
     def w_ep(self)    -> torch.Tensor:
         return F.softplus(self.log_w[2]).clamp(0.1, 2.0)
 
@@ -124,7 +119,7 @@ def haversine_distance(pred: torch.Tensor, gt: torch.Tensor,
     dlat = pr[...,0] - gr[...,0]; dlon = pr[...,1] - gr[...,1]
     a = (torch.sin(dlat/2)**2
          + torch.cos(pr[...,0]) * torch.cos(gr[...,0]) * torch.sin(dlon/2)**2)
-    return R * 2 * torch.asin(a.clamp(0., 1.).sqrt())  # FIX: clamp(0,1) not (eps,1-eps)
+    return R * 2 * torch.asin(torch.clamp(a, eps, 1-eps).sqrt())
 
 
 def compute_gt_speed(gt_traj: torch.Tensor) -> torch.Tensor:
@@ -143,7 +138,7 @@ def compute_gt_speed(gt_traj: torch.Tensor) -> torch.Tensor:
 
 def _position_loss_per_sample(pred_traj, gt_traj, step_weights,
                                regime_labels, rii_values,
-                               huber_delta=300.0,  # FIX: was 100, must match ADE scale ~300km
+                               huber_delta=300.0,
                                rii_threshold=0.5, rii_weight_scale=1.5,
                                regime_b_extra=0.5) -> torch.Tensor:
     """Per-sample L_pos → [B]"""
@@ -155,7 +150,9 @@ def _position_loss_per_sample(pred_traj, gt_traj, step_weights,
     weighted = dist_km * w
     huber = F.huber_loss(weighted, torch.zeros_like(weighted),
                          delta=huber_delta, reduction='none')     # [B,T]
-    return (huber * diff_w.unsqueeze(1)).mean(dim=1) / huber_delta  # [B]
+    # Divide by 1000: L_pos ≈ 0.3 vs L_speed ≈ 0.075 → 4× ratio (balanced)
+    # With /100: L_pos≈3 vs L_speed≈0.075 → 40× → speed still weak
+    return (huber * diff_w.unsqueeze(1)).mean(dim=1) / (huber_delta * 1000.0)
 
 
 def _speed_loss_per_sample(pred_speed, gt_traj) -> torch.Tensor:
@@ -214,15 +211,15 @@ class SRCTrackLoss(nn.Module):
     """
 
     def __init__(self,
-                 # Speed weight
-                 w_speed:  float = 5.0,    # FIX: was 10.0 — dominant speed prevents direction learning
-                 # Auxiliary
-                 w_regime: float = 2.0,    # FIX: was 0.5 → RC needs strong signal from ep1
+                 # Speed weight — critical for ATE fix
+                 w_speed:  float = 5.0,    # was 0.5 → 10x amplify
+                 # Auxiliary (fixed)
+                 w_regime: float = 0.5,    # was 0.1 → RC needs more signal
                  w_div:    float = 0.05,
-                 regime_start_epoch: int = 1,    # FIX: was 16 — RC needs signal from day 1
-                 div_start_epoch:    int = 21,   # FIX: was 31
+                 regime_start_epoch: int = 999,  # disabled: regime_acc<33% (anti-learning)
+                 div_start_epoch:    int = 31,
                  # L_pos params
-                 huber_delta:      float = 300.0,   # FIX: was 100
+                 huber_delta:      float = 300.0,   # FIX: was 50
                  rii_threshold:    float = 0.5,
                  rii_weight_scale: float = 1.5,
                  regime_b_extra:   float = 0.5,
@@ -278,8 +275,7 @@ class SRCTrackLoss(nn.Module):
         # Learned weights
         sw      = self.step_weights()    # [T]
         w_pos   = self.loss_weights.w_pos()
-        # FIX: multiply learned weight by fixed amplifier self.w_speed
-        w_speed = self.loss_weights.w_speed() * self.w_speed
+        w_speed = self.loss_weights.w_speed()
         w_ep    = self.loss_weights.w_ep()
 
         # Per-sample losses [B]
@@ -320,14 +316,9 @@ class SRCTrackLoss(nn.Module):
         L_main = 0.5 * L_easy + 0.5 * L_hard
 
         # Auxiliary losses (curriculum)
-        # FIX: regime loss active from ep1 with linear ramp to avoid early collapse
-        # w_regime_eff: 0.1 at ep1, full w_regime by ep5
         if current_epoch >= self.regime_start:
             l_regime = regime_loss(regime_logits, regime_labels,
                                    self.label_smoothing)
-            # Linear ramp: ep1→0.1×, ep5→1.0×, ep5+→1.0×
-            ramp = min(1.0, 0.1 + 0.9 * (current_epoch - self.regime_start) / 4.0)
-            l_regime = l_regime * ramp
         else:
             l_regime = pred_traj.new_zeros(())
 
@@ -338,7 +329,7 @@ class SRCTrackLoss(nn.Module):
             l_div = pred_traj.new_zeros(())
 
         # Regularization on learned weights
-        l_reg = self.step_weights.penalty(current_epoch) + self.loss_weights.penalty()
+        l_reg = self.step_weights.penalty() + self.loss_weights.penalty()
 
         total = (L_main
                  + self.w_regime * l_regime
@@ -361,8 +352,6 @@ class SRCTrackLoss(nn.Module):
             "L_easy":     _s(L_easy),
             "L_hard":     _s(L_hard),
             "easy_frac":  easy_frac,
-            # [BUG-D FIX] stats() already has 'sw_*' and 'lw_*' prefixes
-            # f'sw_{k}' was producing 'sw_sw_72h' etc. Now using keys directly.
-            **sw_s,   # keys: sw_6h, sw_24h, sw_48h, sw_72h, sw_ratio
-            **lw_s,   # keys: lw_pos, lw_speed, lw_ep
+            **{f"sw_{k}": v for k, v in sw_s.items()},
+            **{f"lw_{k}": v for k, v in lw_s.items()},
         }

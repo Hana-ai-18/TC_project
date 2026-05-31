@@ -107,21 +107,17 @@ class AdaptiveThreshold:
 
 def get_difficulty_max(epoch: int, cfg: SRCTrackConfig) -> Optional[float]:
     t = cfg.train
-    if epoch <= t.phase1_end:   return t.phase1_diff_max  # 0.7 (was 0.4)
-    elif epoch <= t.phase2_end: return t.phase2_diff_max  # 1.0 = all seqs (was 0.7)
-    else:                       return None               # all seqs
+    if epoch <= t.phase1_end:   return t.phase1_diff_max
+    elif epoch <= t.phase2_end: return t.phase2_diff_max
+    else:                       return None
 
 
 def make_sampler(dataset, epoch: int,
                  cfg: SRCTrackConfig) -> Optional[WeightedRandomSampler]:
-    """
-    Regime-stratified sampling from ep1 to prevent RC regime collapse.
-    FIX: was only active for phase3+. Now active from ep1 with increasing weight.
-      Phase 1 (ep 1-5):  Regime B 2.0×, Regime C 1.5× (build diverse RC from scratch)
-      Phase 2 (ep 6-20): Regime B 1.8×, Regime C 1.3×
-      Phase 3+ (ep21+):  Regime B 1.5×, Regime C 1.1×
-    Works with SRCTrackDataset or Subset. (BUG-8 FIX)
-    """
+    """Phase 3+: oversample Regime B 1.5×. Works with SRCTrackDataset or Subset."""
+    if epoch <= cfg.train.phase2_end:
+        return None
+    # BUG-8 FIX: get sequences from underlying dataset if Subset
     from torch.utils.data import Subset
     if isinstance(dataset, Subset):
         base    = dataset.dataset
@@ -129,28 +125,12 @@ def make_sampler(dataset, epoch: int,
         seqs    = [base.sequences[i] for i in indices]
     else:
         seqs = dataset.sequences
-
-    t = cfg.train
-    if epoch <= t.phase1_end:
-        # Strongest upsampling — RC must see all regimes early
-        wb, wc = 2.0, 1.5
-    elif epoch <= t.phase2_end:
-        wb, wc = 1.8, 1.3
-    else:
-        wb, wc = 1.5, 1.1
-
-    weights = []
-    for s in seqs:
-        r = s['regime']
-        if r == 1:   weights.append(wb)
-        elif r == 2: weights.append(wc)
-        else:        weights.append(1.0)
+    weights = [1.5 if s['regime'] == 1 else 1.0 for s in seqs]
     return WeightedRandomSampler(weights, num_samples=len(weights), replacement=True)
 
 
 def make_dataloader(dataset, epoch: int,
                     cfg: SRCTrackConfig, shuffle: bool = True) -> DataLoader:
-    # FIX: regime sampler now always active during training (from ep1)
     sampler = make_sampler(dataset, epoch, cfg) if shuffle else None
     return DataLoader(
         dataset,
@@ -178,6 +158,12 @@ def save_checkpoint(path, epoch, model, optimizer, scheduler, metrics, cfg):
 def load_checkpoint(path, model, optimizer=None, scheduler=None):
     ck = torch.load(path, map_location="cpu")
     model.load_state_dict(ck["model_state"])
+    if criterion and "criterion_state" in ck:
+        try:
+            criterion.load_state_dict(ck["criterion_state"])
+            print("  Criterion state loaded (step/loss weights restored)")
+        except Exception as e:
+            print(f"  [warn] criterion state not loaded: {e}")
     if optimizer and "optim_state" in ck:
         try: optimizer.load_state_dict(ck["optim_state"])
         except Exception as e: print(f"  [warn] optimizer state not loaded: {e}")
@@ -283,11 +269,6 @@ def train_epoch(model, loader, optimizer, criterion, epoch, cfg, adap=None, scal
             with torch.amp.autocast("cuda"):
                 outputs = model(batch)
                 losses  = criterion(outputs, batch, epoch)
-            # BUG-NAN FIX: check BEFORE backward — NaN loss → NaN grads corrupt weights
-            if not torch.isfinite(losses["loss"]):
-                if i < 10: print(f"  [WARN] NaN/Inf loss at batch {i}, skipping")
-                scaler.update()   # keep scaler state consistent
-                continue
             scaler.scale(losses["loss"]).backward()
             scaler.unscale_(optimizer)
             nn.utils.clip_grad_norm_(model.parameters(), cfg.train.grad_clip)
@@ -295,13 +276,13 @@ def train_epoch(model, loader, optimizer, criterion, epoch, cfg, adap=None, scal
         else:
             outputs = model(batch)
             losses  = criterion(outputs, batch, epoch)
-            # BUG-NAN FIX: check BEFORE backward — NaN loss → NaN grads corrupt weights
-            if not torch.isfinite(losses["loss"]):
-                if i < 10: print(f"  [WARN] NaN/Inf loss at batch {i}, skipping")
-                continue
             losses["loss"].backward()
             nn.utils.clip_grad_norm_(model.parameters(), cfg.train.grad_clip)
             optimizer.step()
+
+        if not torch.isfinite(losses["loss"]):
+            if i < 5: print(f"  [WARN] NaN/Inf loss at batch {i}")
+            continue
 
         total_loss += losses["loss"].item()
         for k, v in losses.items():
@@ -311,8 +292,8 @@ def train_epoch(model, loader, optimizer, criterion, epoch, cfg, adap=None, scal
 
         if i % 20 == 0:
             lr = optimizer.param_groups[0]["lr"]
-            sw_72 = losses.get("sw_72h", 0.)   # [BUG-D FIX] was sw_sw_72h
-            sw_r  = losses.get("sw_ratio", 0.)  # [BUG-D FIX] was sw_sw_ratio
+            sw_72 = losses.get("sw_sw_72h", losses.get("sw_72h", 0.))
+            sw_r  = losses.get("sw_sw_ratio", losses.get("sw_ratio", 0.))
             thr_s = f" thr={adap.get():.2f}" if adap else ""
             print(
                 f"  [{epoch:>3}][{i:>4}/{len(loader)}]"
@@ -386,9 +367,7 @@ def train(cfg: SRCTrackConfig, args=None):
         obs_len=cfg.data.obs_len, pred_len=cfg.data.pred_len, stride=cfg.data.stride,
         speed_mean=cfg.data.scs_speed_mean, speed_std=cfg.data.scs_speed_std,
         max_difficulty=diff_max,
-        # [BUG-A FIX] use_flip_aug removed (invalid for SCS absolute coordinates)
-        use_flip_aug=False, use_noise_aug=True, use_intensity_aug=True,
-        use_heading_jitter=True,   # [AUG-4] NEW valid augmentation
+        use_flip_aug=True, use_noise_aug=True, use_intensity_aug=True,
         is_val=False,  # augmentation ON for train
     )
     val_ds = SRCTrackDataset(
@@ -398,8 +377,7 @@ def train(cfg: SRCTrackConfig, args=None):
         speed_mean=cfg.data.scs_speed_mean, speed_std=cfg.data.scs_speed_std,
         max_difficulty=None,
         use_flip_aug=False, use_noise_aug=False, use_intensity_aug=False,
-        use_heading_jitter=False,  # no augmentation for val
-        is_val=True,
+        is_val=True,   # no augmentation for val
     )
     val_loader = DataLoader(val_ds, batch_size=cfg.train.batch_size,
                             shuffle=False, num_workers=cfg.train.num_workers,
@@ -412,25 +390,34 @@ def train(cfg: SRCTrackConfig, args=None):
 
     # BUG-1 FIX: criterion defined BEFORE optimizer
     criterion = SRCTrackLoss(
-        w_speed=cfg.loss.w_speed,            # 5.0 (was 10.0)
-        w_regime=cfg.loss.w_regime,          # 2.0 (was 1.0) — RC needs strong signal
+        w_regime=cfg.loss.w_regime,
         w_div=cfg.loss.w_div,
-        regime_start_epoch=cfg.loss.regime_start_epoch,  # 1 (was 16)
-        div_start_epoch=cfg.loss.div_start_epoch,        # 21 (was 31)
+        regime_start_epoch=cfg.loss.regime_start_epoch,
+        div_start_epoch=cfg.loss.div_start_epoch,
         huber_delta=cfg.loss.huber_delta,
         rii_threshold=cfg.loss.rii_threshold,
         rii_weight_scale=cfg.loss.rii_weight_scale,
         regime_b_extra=cfg.loss.regime_b_extra,
         easy_thresh=cfg.train.easy_thresh_init,
+        # v3 explicit speed weight
+        w_speed=cfg.loss.w_speed,
     ).to(device)
 
-    # FIX: Bỏ warmup, dùng lr constant + CosineAnnealing (đã chứng minh ổn định)
-    # Warmup cũ: initial_lr=3e-4 quá cao → oscillation (ADE lên xuống ep3-6)
-    all_params = list(model.parameters()) + list(criterion.parameters())
-    optimizer = AdamW(all_params, lr=cfg.train.lr, weight_decay=cfg.train.weight_decay)
-
-    scheduler = CosineAnnealingLR(optimizer,
-                                   T_max=cfg.train.max_epochs,
+    # 3 param groups with different LRs:
+    # - SpeedHead: 10× LR (speed must learn much faster than direction)
+    # - Criterion (step/loss weights): 10× LR
+    # - Rest of model: base LR
+    speed_params = list(model.speed_head.parameters())
+    speed_ids    = {id(p) for p in speed_params}
+    other_params = [p for p in model.parameters() if id(p) not in speed_ids]
+    optimizer = AdamW([
+        {"params": other_params,           "lr": cfg.train.lr},
+        {"params": speed_params,           "lr": cfg.train.lr * 10.0,
+         "weight_decay": 0.0},
+        {"params": criterion.parameters(), "lr": cfg.train.lr * 10.0,
+         "weight_decay": 0.0},
+    ], weight_decay=cfg.train.weight_decay)
+    scheduler = CosineAnnealingLR(optimizer, T_max=cfg.train.max_epochs,
                                    eta_min=cfg.train.min_lr)
 
     scaler = torch.amp.GradScaler("cuda") if (
