@@ -1,1 +1,3 @@
-from .losses import SRCTrackLoss, haversine_distance, position_loss, speed_loss
+from .losses import (SRCTrackLoss, haversine_distance,
+                     ConstrainedStepWeights, ConstrainedLossWeights,
+                     regime_loss, diversity_loss)

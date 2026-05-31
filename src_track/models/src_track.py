@@ -354,7 +354,7 @@ class SpeedHead(nn.Module):
         # Init output bias → SCS mean speed ~18 km/6h at epoch 0
         # softplus(b)*5 + speed_min = 18  →  softplus(b) = 3  →  b ≈ 2.95
         with torch.no_grad():
-            self.net[-1].bias.fill_(2.95)
+            self.net[-1].bias.fill_(9.0)   # FIX: was 2.95→18km/6h, now 9→48km/6h (SCS true mean)
 
     def forward(self, context: torch.Tensor) -> torch.Tensor:
         raw = self.net(context)   # [B, T_pred]
@@ -568,7 +568,7 @@ class SRCTrack(nn.Module):
         sce_img_size:   int = 81,
         sce_thermo_dim: int = 32,
         # TKE
-        tke_input_dim: int = 117,
+        tke_input_dim: int = 119,
         tke_d_model:   int = 64,
         tke_n_heads:   int = 4,
         tke_n_layers:  int = 2,   # 2 layers
@@ -738,7 +738,7 @@ def build_model(cfg=None) -> SRCTrack:
         sce_d_model=m.sce_d_model,   sce_n_heads=m.sce_n_heads,
         sce_n_layers=m.sce_n_layers, sce_patch_size=m.sce_patch_size,
         sce_thermo_dim=m.sce_thermo_dim,
-        tke_input_dim=m.tke_input_dim, tke_d_model=m.tke_d_model,
+        tke_input_dim=m.tke_input_dim,  # 119 = 9+26+84 tke_d_model=m.tke_d_model,
         tke_n_heads=m.tke_n_heads,   tke_n_layers=m.tke_n_layers,
         obs_len=cfg.data.obs_len,
         rc_dropout=0.3,

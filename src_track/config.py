@@ -55,7 +55,7 @@ class DataConfig:
     annular_outer_deg: float = 7.0
 
     # SVE
-    sve_dim: int = 24
+    sve_dim: int = 26   # +2: thickness proxy + upper divergence
     env_dim: int = 84
 
     # Augmentation
@@ -75,7 +75,7 @@ class ModelConfig:
     sce_dropout:    float = 0.1
 
     # TKE: input = PhysNorm(9) + SVE(24) + Env_data(84) = 117
-    tke_input_dim: int = 117
+    tke_input_dim: int = 119   # 9(PhysNorm)+26(SVE)+84(Env) — SVE now 26
     tke_d_model:   int = 64
     tke_n_heads:   int = 4
     tke_n_layers:  int = 4
@@ -102,8 +102,8 @@ class ModelConfig:
 @dataclass
 class LossConfig:
     # L_total = L_pos + w_speed*L_speed + w_regime*L_regime + w_div*L_diversity
-    w_speed:  float = 0.5
-    w_regime: float = 0.1
+    w_speed:  float = 5.0    # FIX: was 0.5, needs 10x to compete with L_pos~500
+    w_regime: float = 0.5    # FIX: was 0.1, RC not learning due to tiny gradient
     w_div:    float = 0.05
 
     # Curriculum activation epochs
@@ -111,7 +111,7 @@ class LossConfig:
     div_start_epoch:    int = 31
 
     # L_pos
-    huber_delta:    float = 50.0
+    huber_delta:    float = 300.0   # FIX: was 50, should match ADE scale
     step_w_min:     float = 0.625
     step_w_max:     float = 2.0
     rii_threshold:  float = 0.5
@@ -144,7 +144,7 @@ class TrainConfig:
     adaptive_ema_alpha:  float = 0.02
 
     # Optimizer
-    lr:           float = 1e-3
+    lr:           float = 2e-4    # FIX: was 1e-3, use 2e-4 for faster convergence
     weight_decay: float = 1e-4
     min_lr:       float = 1e-5
     grad_clip:    float = 1.0

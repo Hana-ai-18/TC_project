@@ -13,7 +13,7 @@ def haversine_km(lat1,lon1,lat2,lon2):
     r=torch.deg2rad; la1=r(lat1);lo1=r(lon1);la2=r(lat2);lo2=r(lon2)
     dlat=la2-la1;dlon=lo2-lo1
     a=torch.sin(dlat/2)**2+torch.cos(la1)*torch.cos(la2)*torch.sin(dlon/2)**2
-    return R_EARTH*2*torch.asin(a.clamp(1e-8,1-1e-8).sqrt())
+    return R_EARTH*2*torch.asin(a.clamp(0.,1.).sqrt())
 
 
 def compute_ate_cte(pred,gt):
@@ -29,7 +29,10 @@ def compute_ate_cte(pred,gt):
     mag=torch.sqrt(gty**2+gtx**2).clamp(1e-3)
     uy=gty/mag; ux=gtx/mag
     ate=(err_lat*uy+err_lon*ux).abs().mean()
-    cte=(err_lat*(-ux)+err_lon*uy).abs().mean()
+    # CTE = cross-track = perpendicular component
+    # n_x = -u_y, n_y = u_x  →  cte = err_lat*n_x + err_lon*n_y = -err_lat*uy + err_lon*ux
+    # Note: consistent with metrics.py v7fix2 logic
+    cte=(err_lat*(-uy)+err_lon*ux).abs().mean()
     return ate, cte
 
 
