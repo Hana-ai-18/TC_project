@@ -58,7 +58,9 @@ def parse_args():
     p.add_argument("--num_workers",   type=int,   default=2,
                    help="DataLoader workers (Kaggle: 2 is safe)")
     p.add_argument("--use_amp",       action="store_true",
-                   help="Enable AMP mixed precision (requires CUDA)")
+                   help="Enable AMP mixed precision. May cause NaN on some GPUs - disable if loss=nan")
+    p.add_argument("--no_amp",        action="store_true",
+                   help="Force disable AMP (use if loss=nan with --use_amp)")
     p.add_argument("--grad_clip",     type=float, default=1.0)
     p.add_argument("--patience",      type=int,   default=15)
     p.add_argument("--seed",          type=int,   default=42)

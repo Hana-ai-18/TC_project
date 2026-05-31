@@ -497,7 +497,15 @@ class RegimeConditionedDecoder(nn.Module):
             delta_lat = spd * dir_blend[:, 0] / 111.0
             delta_lon = spd * dir_blend[:, 1] / (111.0 * torch.cos(lat_rad).clamp(min=1e-3))
 
-            pos = pos + torch.stack([delta_lat, delta_lon], dim=-1)
+            delta = torch.stack([delta_lat, delta_lon], dim=-1)
+            # Clamp delta per step: max 100km/6h = ~0.9° — prevents runaway
+            delta = delta.clamp(-0.9, 0.9)
+            pos = pos + delta
+            # Clamp position to valid geographic range
+            pos = torch.stack([
+                pos[:, 0].clamp(-60.0, 60.0),   # lat
+                pos[:, 1].clamp(60.0, 200.0),    # lon (SCS region)
+            ], dim=-1)
 
             # Update heading for next step
             heading  = torch.atan2(dir_blend[:, 1], dir_blend[:, 0])
@@ -632,13 +640,14 @@ class SRCTrack(nn.Module):
             context, regime_probs, pred_speed, last_pos
         )   # [B, T_pred, 2], dict
 
+        # Cast all outputs to float32 (safe with AMP float16 forward pass)
         return {
-            'pred_traj':     pred_traj,        # [B, T_pred, 2]  lat°, lon°
-            'pred_speed':    pred_speed,        # [B, T_pred]  km/6h
-            'regime_probs':  regime_probs,      # [B, 3]
-            'regime_logits': regime_logits,     # [B, 3]
-            'expert_dirs':   expert_dirs,       # {'A','B','C'}: [B, T_pred, 2]
-            'context':       context,           # [B, 256] for Jacobian
+            'pred_traj':     pred_traj.float(),
+            'pred_speed':    pred_speed.float(),
+            'regime_probs':  regime_probs.float(),
+            'regime_logits': regime_logits.float(),
+            'expert_dirs':   {k: v.float() for k, v in expert_dirs.items()},
+            'context':       context.float(),
         }
 
     @torch.no_grad()
