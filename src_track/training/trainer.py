@@ -242,6 +242,13 @@ def train_epoch(
             nn.utils.clip_grad_norm_(model.parameters(), cfg.train.grad_clip)
             optimizer.step()
 
+        # NaN guard: skip batch, log warning
+        if not torch.isfinite(losses["loss"]):
+            if i < 3:
+                print(f"  [WARN] NaN loss at batch {i} — skip. "
+                      f"If persistent: remove --use_amp or restart kernel.")
+            continue
+
         total_loss += losses["loss"].item()
         for k, v in losses.items():
             if k != "loss":
