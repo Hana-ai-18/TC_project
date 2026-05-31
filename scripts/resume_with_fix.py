@@ -1,14 +1,20 @@
 """
-Resume từ checkpoint v3 với speed fix mạnh hơn.
+Resume từ checkpoint hiện tại với speed fix triệt để.
 
-Chạy từ Kaggle notebook đang chạy:
+FIXES:
+  FIX1: w_speed=5.0 × learned_weight (was: learned_weight only, 5.0 bị ignore!)
+  FIX2: huber_delta 100→300
+  FIX3: w_regime 0.5→1.0 (RC cần nhiều gradient hơn)
+  FIX4: ConstrainedLossWeights.w_speed cap 2.0→5.0
+
+Chạy:
   !python scripts/resume_with_fix.py \
-      --checkpoint /kaggle/working/runs/src_v3/best_ade.pth \
+      --checkpoint /kaggle/working/runs/src_v1/best_ade.pth \
       --dataset_root /kaggle/input/datasets/kaggle1234uitvn/tc-ofm \
-      --output_dir /kaggle/working/runs/src_v3b \
+      --output_dir /kaggle/working/runs/src_v4_speedfix \
       --num_epochs 70 --use_amp
 """
-import os, sys, torch
+import os, sys, shutil
 _pkg = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _pkg not in sys.path: sys.path.insert(0, _pkg)
 
@@ -30,27 +36,31 @@ if __name__ == "__main__":
     cfg.train.batch_size  = args.batch_size
     cfg.train.num_workers = args.num_workers
     cfg.train.seed        = args.seed
-    cfg.train.use_amp     = args.use_amp
+    cfg.train.use_amp     = getattr(args, 'use_amp', False)
 
-    # v3b speed fixes
-    cfg.loss.w_speed   = 10.0   # was 5.0
-    cfg.loss.w_regime  = 0.5
-    cfg.loss.huber_delta = 300.
-    cfg.train.lr       = 2e-4
+    # SPEED FIX
+    cfg.loss.w_speed    = 5.0    # FIX: now ACTUALLY used (bug fixed)
+    cfg.loss.w_regime   = 1.0    # was 0.5 → RC cần gradient mạnh hơn  
+    cfg.loss.huber_delta = 300.  # was 100 → match ADE scale
+    cfg.train.lr        = 2e-4
+
     os.makedirs(args.save_dir, exist_ok=True)
+    # Copy regime csv từ run cũ
+    for old_dir in ["src_v1", "src_v3", "src_v2"]:
+        old_csv = f"/kaggle/working/runs/{old_dir}/sequence_regime_labels.csv"
+        new_csv = os.path.join(args.save_dir, "sequence_regime_labels.csv")
+        if os.path.exists(old_csv) and not os.path.exists(new_csv):
+            shutil.copy(old_csv, new_csv)
+            print(f"  Copied regime CSV from {old_csv}")
+            break
     cfg.data.regime_label_csv = os.path.join(args.save_dir, "sequence_regime_labels.csv")
-    # Copy regime csv from old run if exists
-    old_csv = os.path.join(os.path.dirname(args.save_dir), "src_v3", "sequence_regime_labels.csv")
-    if not os.path.exists(cfg.data.regime_label_csv) and os.path.exists(old_csv):
-        import shutil
-        shutil.copy(old_csv, cfg.data.regime_label_csv)
-        print(f"  Copied regime CSV from {old_csv}")
 
-    print("\n" + "="*60)
-    print("  SPEED FIX v3b RESUME")
-    print(f"  w_speed:   5.0 → 10.0")
-    print(f"  SpeedHead: 48 → 93 km/6h init (gt_mean=113)")
+    print("\n" + "="*65)
+    print("  SPEED FIX v4 — Fixes 4 bugs causing ADE plateau at 300km")
+    print(f"  FIX1: w_speed = learned × 5.0 (was: 5.0 ignored in forward!)")
+    print(f"  FIX2: huber_delta = 300 (was 100, wrong scale)")
+    print(f"  FIX3: w_regime = 1.0 (was 0.5, RC needs more gradient)")
+    print(f"  FIX4: w_speed_cap = 5.0 (was 2.0)")
     print(f"  checkpoint: {args.resume}")
-    print("="*60 + "\n")
-
+    print("="*65 + "\n")
     train(cfg, args)

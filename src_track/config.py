@@ -103,7 +103,7 @@ class ModelConfig:
 class LossConfig:
     # L_total = L_pos + w_speed*L_speed + w_regime*L_regime + w_div*L_diversity
     w_speed:  float = 10.0   # FIX v3b: was 5.0, gt_speed=113 needs stronger signal
-    w_regime: float = 0.5    # FIX: was 0.1, RC not learning due to tiny gradient
+    w_regime: float = 1.0  # FIX: was 0.5    # FIX: was 0.1, RC not learning due to tiny gradient
     w_div:    float = 0.05
 
     # Curriculum activation epochs
@@ -111,7 +111,7 @@ class LossConfig:
     div_start_epoch:    int = 31
 
     # L_pos
-    huber_delta:    float = 300.0   # FIX: was 50, should match ADE scale
+    huber_delta:    float = 300.0   # must match ADE scale ~300km
     step_w_min:     float = 0.625
     step_w_max:     float = 2.0
     rii_threshold:  float = 0.5

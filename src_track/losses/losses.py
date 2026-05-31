@@ -96,7 +96,7 @@ class ConstrainedLossWeights(nn.Module):
     def w_pos(self)   -> torch.Tensor:
         return F.softplus(self.log_w[0]).clamp(0.5, 3.0)
     def w_speed(self) -> torch.Tensor:
-        return F.softplus(self.log_w[1]).clamp(0.1, 2.0)
+        return F.softplus(self.log_w[1]).clamp(0.1, 5.0)  # FIX: was 2.0
     def w_ep(self)    -> torch.Tensor:
         return F.softplus(self.log_w[2]).clamp(0.1, 2.0)
 
@@ -124,7 +124,7 @@ def haversine_distance(pred: torch.Tensor, gt: torch.Tensor,
     dlat = pr[...,0] - gr[...,0]; dlon = pr[...,1] - gr[...,1]
     a = (torch.sin(dlat/2)**2
          + torch.cos(pr[...,0]) * torch.cos(gr[...,0]) * torch.sin(dlon/2)**2)
-    return R * 2 * torch.asin(torch.clamp(a, eps, 1-eps).sqrt())
+    return R * 2 * torch.asin(a.clamp(0., 1.).sqrt())  # FIX: clamp(0,1) not (eps,1-eps)
 
 
 def compute_gt_speed(gt_traj: torch.Tensor) -> torch.Tensor:
@@ -143,7 +143,7 @@ def compute_gt_speed(gt_traj: torch.Tensor) -> torch.Tensor:
 
 def _position_loss_per_sample(pred_traj, gt_traj, step_weights,
                                regime_labels, rii_values,
-                               huber_delta=100.0,
+                               huber_delta=300.0,  # FIX: was 100, must match ADE scale ~300km
                                rii_threshold=0.5, rii_weight_scale=1.5,
                                regime_b_extra=0.5) -> torch.Tensor:
     """Per-sample L_pos → [B]"""
@@ -222,7 +222,7 @@ class SRCTrackLoss(nn.Module):
                  regime_start_epoch: int = 16,
                  div_start_epoch:    int = 31,
                  # L_pos params
-                 huber_delta:      float = 100.0,
+                 huber_delta:      float = 300.0,   # FIX: was 100
                  rii_threshold:    float = 0.5,
                  rii_weight_scale: float = 1.5,
                  regime_b_extra:   float = 0.5,
@@ -278,7 +278,8 @@ class SRCTrackLoss(nn.Module):
         # Learned weights
         sw      = self.step_weights()    # [T]
         w_pos   = self.loss_weights.w_pos()
-        w_speed = self.loss_weights.w_speed()
+        # FIX: multiply learned weight by fixed amplifier self.w_speed
+        w_speed = self.loss_weights.w_speed() * self.w_speed
         w_ep    = self.loss_weights.w_ep()
 
         # Per-sample losses [B]
