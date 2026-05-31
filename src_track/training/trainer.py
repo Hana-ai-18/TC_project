@@ -227,7 +227,7 @@ def train_epoch(
         optimizer.zero_grad()
 
         if scaler is not None:
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast("cuda"):
                 outputs = model(batch)
                 losses  = criterion(outputs, batch, epoch)
             scaler.scale(losses["loss"]).backward()
@@ -473,7 +473,7 @@ def train(cfg: SRCTrackConfig, args=None):
     )
 
     # AMP scaler (optional)
-    scaler = torch.cuda.amp.GradScaler() if (
+    scaler = torch.amp.GradScaler("cuda") if (
         torch.cuda.is_available() and getattr(args, "use_amp", False)
     ) else None
 

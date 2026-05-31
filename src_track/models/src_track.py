@@ -90,7 +90,7 @@ class SpatialContextEncoder(nn.Module):
         self,
         d_model:    int = 128,
         n_heads:    int = 4,
-        n_layers:   int = 4,
+        n_layers:   int = 2,   # 2 layers for small dataset
         patch_size: int = 8,
         img_size:   int = 81,
         thermo_dim: int = 32,
@@ -174,6 +174,8 @@ class SpatialContextEncoder(nn.Module):
         data3d_t: [B, 13, H, W]  (single timestep)
         Returns:  [B, d_model]
         """
+        # Cast to float32: SCE attention overflows with float16 (AMP)
+        data3d_t = data3d_t.float()
         B = data3d_t.shape[0]
 
         # ── Steering branch ───────────────────────────────────
@@ -349,11 +351,13 @@ class SpeedHead(nn.Module):
             nn.GELU(),
             nn.Linear(64, pred_len),
         )
+        # Init output bias → SCS mean speed ~18 km/6h at epoch 0
+        # softplus(b)*5 + speed_min = 18  →  softplus(b) = 3  →  b ≈ 2.95
+        with torch.no_grad():
+            self.net[-1].bias.fill_(2.95)
 
     def forward(self, context: torch.Tensor) -> torch.Tensor:
         raw = self.net(context)   # [B, T_pred]
-        # Softplus keeps output positive; scale to physical range
-        # F.softplus(x) ∈ (0, ∞); * 5 + speed_min → (speed_min, ~large)
         speed = F.softplus(raw) * 5.0 + self.speed_min
         speed = torch.clamp(speed, self.speed_min, self.speed_max)
         return speed   # [B, T_pred]  km/6h
@@ -551,7 +555,7 @@ class SRCTrack(nn.Module):
         # SCE
         sce_d_model:    int = 128,
         sce_n_heads:    int = 4,
-        sce_n_layers:   int = 4,
+        sce_n_layers:   int = 2,   # 2 layers: less overfit on small dataset
         sce_patch_size: int = 8,
         sce_img_size:   int = 81,
         sce_thermo_dim: int = 32,
@@ -559,7 +563,7 @@ class SRCTrack(nn.Module):
         tke_input_dim: int = 117,
         tke_d_model:   int = 64,
         tke_n_heads:   int = 4,
-        tke_n_layers:  int = 4,
+        tke_n_layers:  int = 2,   # 2 layers
         obs_len:       int = 8,
         # Classifier / heads
         rc_dropout:   float = 0.3,
