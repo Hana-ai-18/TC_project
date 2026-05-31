@@ -22,6 +22,20 @@ if __name__ == "__main__":
     args = _apply_aliases(args)
     cfg  = get_config()
 
+    # Auto-generate regime labels nếu chưa có
+    import subprocess, sys as _sys
+    regime_csv = os.path.join(args.save_dir, "sequence_regime_labels.csv")
+    if not os.path.exists(regime_csv):
+        print(f"  [INFO] regime_csv not found, generating...")
+        gen_script = os.path.join(os.path.dirname(__file__), "generate_labels.py")
+        if os.path.exists(gen_script):
+            subprocess.run([_sys.executable, gen_script,
+                "--data1d_root", os.path.join(args.data_root, "Data1d"),
+                "--data3d_dir",  os.path.join(args.data_root, "Data3d"),
+                "--output", regime_csv], check=True)
+        else:
+            print(f"  [WARN] generate_labels.py not found, training without regime labels")
+
     # Apply CLI overrides
     data_root = args.data_root
     cfg.data.data1d_train   = os.path.join(data_root, "Data1d", "train")

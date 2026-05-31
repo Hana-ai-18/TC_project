@@ -391,7 +391,11 @@ class SRCTrackDataset(Dataset):
                 spds = np.sqrt(np.diff(phys[:,0])**2+np.diff(phys[:,1])**2)*111.
                 sv   = float(spds.std()) if len(spds)>0 else 0.
                 regime, rii = self._get_regime_info(sid, start)
-                diff = .5*min(rii/2.,1.) + .3*{0:.2,1:1.,2:.4}.get(regime,.5) + .2*min(sv/15.,1.)
+                if self.regime_df is None:
+                    # No regime labels: assign low difficulty so curriculum works
+                    diff = 0.2 + .2*min(sv/15.,1.)   # max=0.4, always passes phase1
+                else:
+                    diff = .5*min(rii/2.,1.) + .3*{0:.2,1:1.,2:.4}.get(regime,.5) + .2*min(sv/15.,1.)
                 seqs.append({'storm_id':sid,'start_idx':start,'stride':stride,
                              'year':year,'name':name,
                              'obs_raw':obs,'pred_raw':pred,
@@ -403,7 +407,7 @@ class SRCTrackDataset(Dataset):
         if self.regime_df is None: return 1, 0.5
         r = self.regime_df[(self.regime_df['storm_id']==storm_id) &
                            (self.regime_df['start_idx']==start_idx)]
-        return (int(r.iloc[0]['regime']), float(r.iloc[0]['rii'])) if len(r)>0 else (1, 0.5)
+        return (int(r.iloc[0]['regime']), float(r.iloc[0]['rii'])) if len(r)>0 else (1, 0.0)
 
     def _load_data3d(self, year, name, timestamps):
         patches = []
