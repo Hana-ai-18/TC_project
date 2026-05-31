@@ -27,6 +27,8 @@ def parse_args():
     # New-style: single root
     p.add_argument("--data_root",   default=None,
                    help="Root containing Data1d/, Data3d/, Env_Data/")
+    p.add_argument("--dataset_root", default=None,
+                   help="Alias for --data_root (Kaggle style)")
     # Old-style: individual dirs
     p.add_argument("--data1d_dir",  default=None,
                    help="Path to Data1d/train (or Data1d/)")
@@ -50,8 +52,8 @@ def main():
     args = parse_args()
 
     # Resolve data root
-    if args.data_root:
-        data_root = args.data_root
+    if args.data_root or args.dataset_root:
+        data_root = args.data_root or args.dataset_root
         data1d_root = os.path.join(data_root, "Data1d")
         data3d_dir  = os.path.join(data_root, "Data3d")
     elif args.data1d_dir:

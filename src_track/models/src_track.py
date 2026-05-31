@@ -54,9 +54,12 @@ class SimpleMHA(nn.Module):
         self.norm2 = nn.LayerNorm(d_model)
 
     def forward(self, x: torch.Tensor,
-                attn_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        # Self-attention
-        h, _ = self.attn(x, x, x, attn_mask=attn_mask)
+                attn_mask: Optional[torch.Tensor] = None,
+                key_padding_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        # Self-attention with optional annular key masking
+        h, _ = self.attn(x, x, x,
+                         attn_mask=attn_mask,
+                         key_padding_mask=key_padding_mask)
         x = self.norm(x + h)
         # FFN
         x = self.norm2(x + self.ff(x))
@@ -177,12 +180,10 @@ class SpatialContextEncoder(nn.Module):
         steer_in = data3d_t[:, self.STEERING_CH]           # [B, 4, H, W]
         patches  = self.steer_embed(steer_in) + self.pos_embed  # [B, N, D]
 
+        # annular_key_mask: True = ignore non-annular patches [N]
+        key_mask = self.annular_key_mask.unsqueeze(0).expand(B, -1)  # [B, N]
         for layer in self.steer_layers:
-            # key_padding_mask: True = ignore  [B, N] — non-annular patches
-            key_mask = self.annular_key_mask.unsqueeze(0).expand(B, -1)
-            patches  = layer(patches, attn_mask=None)
-            # Soft masking: zero out non-annular patch outputs
-            # (hard masking is done via key_padding_mask in layer.attn)
+            patches = layer(patches, attn_mask=None, key_padding_mask=key_mask)
 
         # Pooling: [B, N, D] → [B, D]
         steer_out = self.steer_pool(patches.transpose(1, 2)).squeeze(-1)  # [B, D]

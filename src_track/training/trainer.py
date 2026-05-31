@@ -299,7 +299,10 @@ def evaluate(
         regime = batch.get("regime_label")
         rii    = batch.get("rii")
 
-        acc.update(pred, gt, regime_labels=regime, rii=rii)
+        acc.update(pred, gt,
+                   regime_labels=regime,
+                   rii=rii,
+                   regime_pred=out.get("regime_probs"))
 
     results = acc.compute()
     elapsed = time.perf_counter() - t0
