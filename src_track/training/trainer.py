@@ -397,24 +397,14 @@ def train(cfg: SRCTrackConfig, args=None):
         w_speed=cfg.loss.w_speed,
     ).to(device)
 
-    # BUG-2 FIX: include criterion.parameters() in optimizer
+    # FIX: Bỏ warmup, dùng lr constant + CosineAnnealing (đã chứng minh ổn định)
+    # Warmup cũ: initial_lr=3e-4 quá cao → oscillation (ADE lên xuống ep3-6)
     all_params = list(model.parameters()) + list(criterion.parameters())
-    # Start at 3e-4 for faster early convergence,
-    # warmup 5 epochs then cosine to min_lr
-    initial_lr = min(cfg.train.lr * 3.0, 3e-4)
-    optimizer = AdamW(all_params, lr=initial_lr, weight_decay=cfg.train.weight_decay)
+    optimizer = AdamW(all_params, lr=cfg.train.lr, weight_decay=cfg.train.weight_decay)
 
-    def lr_lambda(epoch):
-        warmup = 5
-        if epoch < warmup:
-            return (epoch + 1) / warmup   # linear warmup
-        # cosine decay from initial_lr to min_lr
-        progress = (epoch - warmup) / max(cfg.train.max_epochs - warmup, 1)
-        cosine   = 0.5 * (1.0 + math.cos(math.pi * progress))
-        min_ratio = cfg.train.min_lr / initial_lr
-        return max(cosine * (1.0 - min_ratio) + min_ratio, min_ratio)
-
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    scheduler = CosineAnnealingLR(optimizer,
+                                   T_max=cfg.train.max_epochs,
+                                   eta_min=cfg.train.min_lr)
 
     scaler = torch.amp.GradScaler("cuda") if (
         torch.cuda.is_available() and getattr(args, "use_amp", False)) else None
